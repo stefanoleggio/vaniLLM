@@ -1,6 +1,8 @@
 # **VaniLLM**
 A simple Large Language Model built from scratch for text completion.
 
+![Example](example_gif.gif)
+
 ## **Overview**
 VaniLLM is a small educational LLM implemented entirely from scratch in Python and PyTorch.
 It is trained and tested on a single poem — Shakespeare’s *Sonnet 18* — and can generate the continuation of the text given a prompt.

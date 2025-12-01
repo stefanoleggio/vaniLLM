@@ -21,5 +21,5 @@ block_size = 64
 embedding_dim = 32
 batch_size = 4
 n_heads = 4
-n_epochs = 100
+n_epochs = 300
 device = 'cuda'
