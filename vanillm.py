@@ -166,7 +166,7 @@ class SelfAttentionHead(nn.Module):
         self.causal_mask = torch.ones(block_size, block_size).to('cuda')
         self.causal_mask = self.causal_mask.tril()
 
-        self.softmax = nn.Softmax()
+        self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x):
 
@@ -210,7 +210,7 @@ class MultiHeadAttention(nn.Module):
             head_outputs.append(self.self_attention_heads[i](x))
 
         # Concatenate all the outputs of the Self attention layers On the last dimension (the head dimension)
-        multihead_output = torch.cat(head_outputs, dim=2)
+        multihead_output = torch.cat(head_outputs, dim=-1)
 
         # Pass the result through the final linear layer to unify all the results of the attention into a single unified transformation
         output = self.final_layer(multihead_output)
@@ -278,32 +278,21 @@ for batch in batch_list:
     # Add batch dimension → [1, T]
     # Because every operation does a down dimension
     batch_tensor = batch_tensor.unsqueeze(0)
-
-    vanillallm_model(batch_tensor)
-
     
-    # Input and target
-    #x_batch = batch_tensor[:, :-1]   # [1, T-1]
-    #y_batch = batch_tensor[:, 1:]    # [1, T-1]
-
-    #print(batch_tensor.shape)
+    x_batch = batch_tensor[:, :-1]   # [1, T-1]
+    y_batch = batch_tensor[:, 1:]    # [1, T-1]
 
     # Forward pass
-    #logits = vanillallm_model(x_batch)   # [B=1, T-1, vocab_size]
+    logits = vanillallm_model(x_batch)   # [B=1, T-1, vocab_size]
 
-    """
-    # Flatten dynamically
-    B, T, V = logits.shape
+    B, T, V,_ = logits.shape
     logits_flat = logits.view(B * T, V)
     y_flat = y_batch.view(B * T)
-
-    # Loss
     loss = F.cross_entropy(logits_flat, y_flat)
 
     # Backprop
     optim.zero_grad()
     loss.backward()
     optim.step()
-    """
 
 
