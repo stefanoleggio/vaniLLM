@@ -1,86 +1,9 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import math
-import torch.nn.functional as F
-
-#This is my training data
-poem_txt = 'Sempre caro mi fu quest’ermo colle, E questa siepe, che da tanta parte Dell’ultimo orizzonte il guardo esclude. Ma sedendo e mirando, interminati Spazi di là da quella, e sovrumani Silenzi, e profondissima quiete Io nel pensier mi fingo; ove per poco Il cor non si spaura. E come il vento Odo stormir tra queste piante, io quello Infinito silenzio a questa voce Vo comparando: e mi sovvien l’eterno, E le morte stagioni, e la presente E viva, e il suon di lei. Così tra questa Immensità s’annega il pensier mio: E il naufragar m’è dolce in questo mare.'
-
-class Tokenizer:
-
-    def __init__(self, training_txt):
-
-        self.tokens_dict = self.create_tokens_dict(training_txt)
-
-
-    def create_tokens_dict(self, training_txt):
-
-        tokens_dict = {}
-        token_id = 0
-
-        for ch in training_txt:
-            if ch not in tokens_dict.keys():
-                tokens_dict[ch] = token_id
-                token_id += 1
-        
-        return tokens_dict
-    
-    def txt_2_tokens(self, txt):
-        tokens = []
-        for ch in txt:
-            tokens.append(self.tokens_dict[ch])
-        return tokens
-
-    def tokens_2_txt(self, tokens):
-        txt = []
-        for tk in tokens:
-            for key in self.tokens_dict.keys():
-                if self.tokens_dict[key] == tk:
-                    txt.append(key)
-        return txt
-    
-def list_2_batch(list, batch_size, block_size):
-
-    batch_list = []
-    tmp_batch = []
-    i = 0 #index for block size
-    j = 0 #index for batch size
-
-    while i+block_size<len(list):
-        tmp_batch.append(list[i:i+block_size])
-        i+=1
-        if len(tmp_batch) > batch_size -1:
-            batch_list.append(tmp_batch)
-            tmp_batch = []
-
-    return batch_list
-
-
-    
-tokenizer = Tokenizer(poem_txt)
-tokens = tokenizer.txt_2_tokens(poem_txt)
-back_to_txt = tokenizer.tokens_2_txt(tokens)
-
-# Define how many tokens the model can look at once
-# So the prediction will be based only on these characters
-block_size = 10
-print("block size: " + str(block_size))
-
-
-vocab_size = len(tokenizer.tokens_dict)
-print("vocab size: " + str(vocab_size))
-
-# Define the dimension of the embedding vector for each token
-embedding_dim = 32
-print("edmbedding dimension: " + str(embedding_dim))
-
-batch_size = 4
-print("batch size: " + str(batch_size))
-
-n_heads = 4
-print("number of attention heads: " + str(n_heads))
-
+import torch
+import torch.nn as nn
+import shared
 
 class VanillmModel(nn.Module):
     def __init__(self, block_size, vocab_size, embedding_dim, n_heads):
@@ -113,7 +36,6 @@ class VanillmModel(nn.Module):
 
         '''
 
-
         self.positional_embedding_table = nn.Embedding(num_embeddings=self.block_size, embedding_dim=self.embedding_dim)
 
         '''
@@ -122,27 +44,37 @@ class VanillmModel(nn.Module):
         the positional_embedding_table associates a vector to each POSITION in the sequence.
         '''
 
-        self.transformer = Transformer(self.embedding_dim, self.block_size, self.n_heads).to('cuda')
+        self.transformer = Transformer(self.embedding_dim, self.block_size, self.n_heads).to(shared.device)
 
         self.final_linear_layer = nn.Linear(embedding_dim, vocab_size)
 
 
-    def forward(self, x):
-        # Computes the embedding vector of each token
-        # So the output will be a tensor of block_size elements, each of them is a tensor of embedding_dim elements
-        embedded_tensor = self.token_embedding_table(x)
-        pos = torch.arange(block_size, device='cuda')
-        pos_tensor = self.positional_embedding_table(pos)
+    def forward(self, idx):
+        # idx is expected to be [B, T] (batch, time)
+        B, T = idx.shape
 
-        pos_embedded_tensor = embedded_tensor + pos_tensor
+        # ----- token + positional embeddings -----
+        embedded_tensor = self.token_embedding_table(idx)  # [B, T, C]
 
-        transformer_output = self.transformer(pos_embedded_tensor)
+        # 🔧 FIX 1: use actual T from input, not self.block_size
+        positions = torch.arange(T, device=idx.device)     # [T]
+        pos_tensor = self.positional_embedding_table(positions)  # [T, C]
 
-        output = self.final_linear_layer(transformer_output)
+        # broadcast [T, C] over batch → [B, T, C]
+        pos_embedded_tensor = embedded_tensor + pos_tensor  # [B, T, C]
 
-        return output
+        # ----- transformer -----
+        x = self.transformer(pos_embedded_tensor)          # [B, T, C]
 
+        # ----- final linear layer → logits -----
+        logits = self.final_linear_layer(x)                # [B, T, vocab_size]
 
+        # 🔧 FIX 2: for training, return raw logits (no softmax here)
+        return logits
+
+        # if you ever want probabilities for inference ONLY:
+        # probs = self.final_soft_max(logits)
+        # return probs
 
 class SelfAttentionHead(nn.Module):
     def __init__(self, embedding_dim, head_dim, block_size):
@@ -163,31 +95,39 @@ class SelfAttentionHead(nn.Module):
         self.linear_V = nn.Linear(self.embedding_dim, self.head_dim, bias=False)
 
         # The casual mask is a lower-triangular matrix that prevents attention to future position, it will be used and explained in the forward pass
-        self.causal_mask = torch.ones(block_size, block_size).to('cuda')
-        self.causal_mask = self.causal_mask.tril()
+        # 🔧 FIX: create it once with max size (block_size x block_size), but DON'T hardcode device here
+        causal_mask = torch.ones(self.block_size, self.block_size)
+        causal_mask = causal_mask.tril()
+        self.register_buffer("causal_mask", causal_mask)  # so it moves with .to(device)
 
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x):
 
-        Q = self.linear_Q(x)
-        K = self.linear_K(x)
-        V = self.linear_V(x)
+        # x: [B, T, embedding_dim]
+        B, T, C = x.shape
 
-        attention_scores = torch.matmul(Q, K.transpose(-2, -1))
+        Q = self.linear_Q(x)   # [B, T, head_dim]
+        K = self.linear_K(x)   # [B, T, head_dim]
+        V = self.linear_V(x)   # [B, T, head_dim]
+
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1))  # [B, T, T]
 
         # Scaling the scores for stabilizing the training
         attention_scores = attention_scores * 1/math.sqrt(self.head_dim)
 
+        # 🔧 FIX: slice causal mask to current sequence length and ensure it's on the same device as x
+        causal_mask = self.causal_mask[:T, :T].to(x.device)      # [T, T]
+
         # Put all the zero indexes of the causal mask of the attention score to a large negative number (this is for the softmax)
-        attention_scores = attention_scores.masked_fill(self.causal_mask == 0, -1e10)
+        attention_scores = attention_scores.masked_fill(causal_mask == 0, -1e10)
 
         attention_scores_probs = self.softmax(attention_scores)
 
-        output = torch.matmul(attention_scores_probs, V)
+        output = torch.matmul(attention_scores_probs, V)         # [B, T, head_dim]
 
         return output
-    
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, embedding_dim, n_heads, block_size):
 
@@ -245,6 +185,7 @@ class Transformer(nn.Module):
         self.block_size = block_size
         self.n_heads = n_heads
 
+
         self.layer_norm_1 = nn.LayerNorm(self.embedding_dim)
         self.layer_norm_2 = nn.LayerNorm(self.embedding_dim)
         self.multi_head_attention = MultiHeadAttention(self.embedding_dim, self.n_heads, self.block_size)
@@ -253,46 +194,9 @@ class Transformer(nn.Module):
     def forward(self, x):
         x_normed = self.layer_norm_1(x)
         attention_output = self.multi_head_attention(x_normed)
-        x += attention_output
+        x = x + attention_output
         x_normed = self.layer_norm_2(x)
         ff_output = self.feed_forward_network(x_normed)
-        x += ff_output
+        x = x + ff_output
 
         return x
-
-
-
-vanillallm_model = VanillmModel(block_size, vocab_size, embedding_dim, n_heads).to('cuda')
-
-print(vanillallm_model.eval())
-
-batch_list = list_2_batch(tokens, batch_size, block_size)
-
-
-for batch in batch_list:
-
-
-    # Convert list → tensor [T]
-    batch_tensor = torch.tensor(batch, dtype=torch.long, device='cuda')
-
-    # Add batch dimension → [1, T]
-    # Because every operation does a down dimension
-    batch_tensor = batch_tensor.unsqueeze(0)
-    
-    x_batch = batch_tensor[:, :-1]   # [1, T-1]
-    y_batch = batch_tensor[:, 1:]    # [1, T-1]
-
-    # Forward pass
-    logits = vanillallm_model(x_batch)   # [B=1, T-1, vocab_size]
-
-    B, T, V,_ = logits.shape
-    logits_flat = logits.view(B * T, V)
-    y_flat = y_batch.view(B * T)
-    loss = F.cross_entropy(logits_flat, y_flat)
-
-    # Backprop
-    optim.zero_grad()
-    loss.backward()
-    optim.step()
-
-
